@@ -3,7 +3,7 @@ import discord
 from discord.ext import commands
 
 import storage
-from cogs.battlenet import BattleNetClient
+from battlenet import BattleNetClient
 
 log = logging.getLogger("wow-bot.account")
 
