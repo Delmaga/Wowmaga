@@ -2,10 +2,9 @@ import os
 import time
 import aiohttp
 
-BLIZZARD_REGION = os.getenv("BLIZZARD_REGION", "eu").lower()
 BLIZZARD_CLIENT_ID = os.getenv("BLIZZARD_CLIENT_ID")
 BLIZZARD_CLIENT_SECRET = os.getenv("BLIZZARD_CLIENT_SECRET")
-BLIZZARD_REDIRECT_URI = os.getenv("BLIZZARD_REDIRECT_URI")  # ex: https://tonbot.up.railway.app/callback
+BLIZZARD_REDIRECT_URI = os.getenv("BLIZZARD_REDIRECT_URI")
 LOCALE = os.getenv("BLIZZARD_LOCALE", "fr_FR")
 
 _APP_TOKEN_CACHE = {"token": None, "expires_at": 0}
@@ -20,18 +19,8 @@ def _api_host(region: str) -> str:
 
 
 class BattleNetClient:
-    """Client Battle.net : jeton d'application (données publiques, ex. équipement d'un perso)
-    + flow OAuth utilisateur (pour lister TOUS les personnages liés au compte de quelqu'un)."""
-
-    def __init__(self, region: str | None = None):
-        if not BLIZZARD_CLIENT_ID or not BLIZZARD_CLIENT_SECRET:
-            raise RuntimeError(
-                "BLIZZARD_CLIENT_ID / BLIZZARD_CLIENT_SECRET manquants. "
-                "Crée une application sur https://develop.battle.net/access/clients"
-            )
-        self.region = (region or BLIZZARD_REGION).lower()
-
-    # ---------- Jeton "application" (client_credentials) : données publiques ----------
+    def __init__(self, region: str = None):
+        self.region = (region or os.getenv("BLIZZARD_REGION", "eu")).lower()
 
     async def _get_app_token(self):
         now = time.time()
@@ -50,10 +39,6 @@ class BattleNetClient:
                 _APP_TOKEN_CACHE["expires_at"] = now + data.get("expires_in", 86000)
                 return _APP_TOKEN_CACHE["token"]
 
-    async def _get_public(self, path: str, namespace: str):
-        token = await self._get_app_token()
-        return await self._raw_get(path, namespace, token)
-
     async def _raw_get(self, path: str, namespace: str, token: str):
         params = {"namespace": f"{namespace}-{self.region}", "locale": LOCALE}
         headers = {"Authorization": f"Bearer {token}"}
@@ -65,11 +50,9 @@ class BattleNetClient:
                 resp.raise_for_status()
                 return await resp.json()
 
-    async def get_character_equipment(self, realm_slug: str, character_name: str):
-        path = f"/profile/wow/character/{realm_slug.lower()}/{character_name.lower()}/equipment"
-        return await self._get_public(path, namespace="profile")
-
-    # ---------- OAuth utilisateur (authorization_code) : compte perso ----------
+    async def _get_public(self, path: str, namespace: str):
+        token = await self._get_app_token()
+        return await self._raw_get(path, namespace, token)
 
     def get_authorize_url(self, state: str) -> str:
         return (
@@ -86,17 +69,16 @@ class BattleNetClient:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url,
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": BLIZZARD_REDIRECT_URI,
-                },
+                data={"grant_type": "authorization_code", "code": code, "redirect_uri": BLIZZARD_REDIRECT_URI},
                 auth=aiohttp.BasicAuth(BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET),
             ) as resp:
                 resp.raise_for_status()
                 return await resp.json()
 
-    async def get_account_wow_profile(self, user_access_token: str):
-        """Liste de TOUS les personnages liés au compte Battle.net de l'utilisateur connecté."""
-        path = "/profile/user/wow"
-        return await self._raw_get(path, namespace="profile", token=user_access_token)
+    async def get_account_wow_profile(self, user_token: str):
+        """Tous les personnages du compte connecté."""
+        return await self._raw_get("/profile/user/wow", "profile", user_token)
+
+    async def get_character_equipment(self, realm_slug: str, name: str):
+        path = f"/profile/wow/character/{realm_slug.lower()}/{name.lower()}/equipment"
+        return await self._get_public(path, "profile")

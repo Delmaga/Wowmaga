@@ -30,8 +30,6 @@ async def init_db():
         await db.commit()
 
 
-# ---------- Réglages serveur ----------
-
 async def set_news_channel(guild_id: int, channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -42,21 +40,19 @@ async def set_news_channel(guild_id: int, channel_id: int):
         await db.commit()
 
 
-async def get_all_news_channels() -> list[int]:
+async def get_all_news_channels() -> list:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT news_channel_id FROM guild_settings WHERE news_channel_id IS NOT NULL") as cur:
             rows = await cur.fetchall()
             return [r[0] for r in rows]
 
 
-# ---------- Comptes liés (OAuth Battle.net) ----------
-
 def sign_state(discord_id: int) -> str:
     sig = hmac.new(SECRET_KEY.encode(), str(discord_id).encode(), hashlib.sha256).hexdigest()[:20]
     return f"{discord_id}.{sig}"
 
 
-def verify_state(state: str) -> int | None:
+def verify_state(state: str):
     try:
         discord_id_str, sig = state.split(".", 1)
         expected = hmac.new(SECRET_KEY.encode(), discord_id_str.encode(), hashlib.sha256).hexdigest()[:20]
@@ -67,7 +63,7 @@ def verify_state(state: str) -> int | None:
     return None
 
 
-async def save_user_link(discord_id: int, region: str, access_token: str, refresh_token: str, expires_in: int, battletag: str | None = None):
+async def save_user_link(discord_id: int, region: str, access_token: str, refresh_token: str, expires_in: int, battletag: str = None):
     expires_at = int(time.time()) + expires_in
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(

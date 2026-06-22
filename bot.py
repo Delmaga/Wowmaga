@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -27,7 +28,7 @@ async def on_ready():
         synced = await bot.tree.sync()
         log.info(f"{len(synced)} commande(s) slash synchronisée(s).")
     except Exception as e:
-        log.error(f"Erreur de synchronisation des commandes: {e}")
+        log.error(f"Erreur de synchronisation: {e}")
 
 
 async def main():
@@ -41,9 +42,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    import asyncio
-
     if not TOKEN:
-        raise SystemExit("DISCORD_TOKEN manquant dans les variables d'environnement (.env ou Railway).")
-
+        raise SystemExit("DISCORD_TOKEN manquant dans les variables d'environnement.")
     asyncio.run(main())
