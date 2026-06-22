@@ -7,7 +7,7 @@ from aiohttp import web
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import storage
-from cogs.battlenet import BattleNetClient
+from battlenet import BattleNetClient
 
 log = logging.getLogger("wow-bot.web")
 PORT = int(os.getenv("PORT", "8080"))
