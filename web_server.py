@@ -1,10 +1,6 @@
 import os
-import sys
 import logging
 from aiohttp import web
-
-# Ajoute le dossier racine au path pour que "cogs" soit trouvable
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import storage
 from battlenet import BattleNetClient
