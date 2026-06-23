@@ -1,84 +1,111 @@
 import os
-import time
-import aiohttp
+import json
+import logging
+import re
+import feedparser
+import discord
+from discord.ext import commands, tasks
 
-BLIZZARD_CLIENT_ID = os.getenv("BLIZZARD_CLIENT_ID")
-BLIZZARD_CLIENT_SECRET = os.getenv("BLIZZARD_CLIENT_SECRET")
-BLIZZARD_REDIRECT_URI = os.getenv("BLIZZARD_REDIRECT_URI")
-LOCALE = os.getenv("BLIZZARD_LOCALE", "fr_FR")
+import storage
 
-_APP_TOKEN_CACHE = {"token": None, "expires_at": 0}
+log = logging.getLogger("wow-bot.news")
 
-
-def _oauth_host(region: str) -> str:
-    return "https://www.battlenet.com.cn" if region == "cn" else f"https://{region}.battle.net"
-
-
-def _api_host(region: str) -> str:
-    return f"https://{region}.api.blizzard.com"
+NEWS_FEEDS = [
+    "https://www.wowhead.com/news/rss",
+    "https://worldofwarcraft.blizzard.com/en-us/news/rss",
+]
+INTERVAL = int(os.getenv("NEWS_CHECK_INTERVAL_MINUTES", "30"))
+SEEN_FILE = "seen_news.json"
 
 
-class BattleNetClient:
-    def __init__(self, region: str = None):
-        self.region = (region or os.getenv("BLIZZARD_REGION", "eu")).lower()
+def _load_seen() -> set:
+    if os.path.exists(SEEN_FILE):
+        try:
+            with open(SEEN_FILE, "r") as f:
+                return set(json.load(f))
+        except Exception:
+            pass
+    return set()
 
-    async def _get_app_token(self):
-        now = time.time()
-        if _APP_TOKEN_CACHE["token"] and _APP_TOKEN_CACHE["expires_at"] > now + 30:
-            return _APP_TOKEN_CACHE["token"]
-        url = f"{_oauth_host(self.region)}/oauth/token"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                data={"grant_type": "client_credentials"},
-                auth=aiohttp.BasicAuth(BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET),
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                _APP_TOKEN_CACHE["token"] = data["access_token"]
-                _APP_TOKEN_CACHE["expires_at"] = now + data.get("expires_in", 86000)
-                return _APP_TOKEN_CACHE["token"]
 
-    async def _raw_get(self, path: str, namespace: str, token: str):
-        params = {"namespace": f"{namespace}-{self.region}", "locale": LOCALE}
-        headers = {"Authorization": f"Bearer {token}"}
-        url = f"{_api_host(self.region)}{path}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, headers=headers) as resp:
-                if resp.status == 404:
-                    return None
-                resp.raise_for_status()
-                return await resp.json()
+def _save_seen(seen: set):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(list(seen)[-300:], f)
 
-    async def _get_public(self, path: str, namespace: str):
-        token = await self._get_app_token()
-        return await self._raw_get(path, namespace, token)
 
-    def get_authorize_url(self, state: str) -> str:
-        return (
-            f"{_oauth_host(self.region)}/oauth/authorize"
-            f"?client_id={BLIZZARD_CLIENT_ID}"
-            f"&scope=wow.profile"
-            f"&state={state}"
-            f"&redirect_uri={BLIZZARD_REDIRECT_URI}"
-            f"&response_type=code"
+def _clean(text: str, limit: int = 300) -> str:
+    text = re.sub("<[^<]+?>", "", text or "").strip()
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+class News(commands.Cog):
+    def __init__(self, bot):
+        self.bot      = bot
+        self.seen_ids = _load_seen()
+        self.check_news.start()
+
+    def cog_unload(self):
+        self.check_news.cancel()
+
+    @tasks.loop(minutes=INTERVAL)
+    async def check_news(self):
+        channel_ids = await storage.get_all_news_channels()
+        if not channel_ids:
+            return
+        new_entries = []
+        for url in NEWS_FEEDS:
+            try:
+                for entry in feedparser.parse(url).entries:
+                    eid = entry.get("id", entry.get("link"))
+                    if eid and eid not in self.seen_ids:
+                        new_entries.append(entry)
+                        self.seen_ids.add(eid)
+            except Exception as e:
+                log.error(f"Flux {url}: {e}")
+
+        for entry in reversed(new_entries):
+            embed = discord.Embed(
+                title=entry.get("title", "Actu WoW"),
+                url=entry.get("link"),
+                description=_clean(entry.get("summary", "")),
+                color=discord.Color.gold(),
+            )
+            embed.set_footer(text="World of Warcraft — Actualités")
+            for cid in channel_ids:
+                ch = self.bot.get_channel(cid)
+                if ch:
+                    try:    await ch.send(embed=embed)
+                    except: pass
+
+        if new_entries:
+            _save_seen(self.seen_ids)
+
+    @check_news.before_loop
+    async def before_check(self):
+        await self.bot.wait_until_ready()
+        if not self.seen_ids:
+            for url in NEWS_FEEDS:
+                try:
+                    for entry in feedparser.parse(url).entries:
+                        self.seen_ids.add(entry.get("id", entry.get("link")))
+                except Exception:
+                    pass
+            _save_seen(self.seen_ids)
+
+    @discord.app_commands.command(name="newswow", description="Configure le salon des actualités WoW (admin)")
+    @discord.app_commands.describe(salon="Salon où poster les actus")
+    @discord.app_commands.checks.has_permissions(manage_guild=True)
+    async def newswow(self, interaction: discord.Interaction, salon: discord.TextChannel):
+        await storage.set_news_channel(interaction.guild_id, salon.id)
+        await interaction.response.send_message(
+            f"✅ Actualités WoW → {salon.mention}", ephemeral=True
         )
 
-    async def exchange_code(self, code: str) -> dict:
-        url = f"{_oauth_host(self.region)}/oauth/token"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                data={"grant_type": "authorization_code", "code": code, "redirect_uri": BLIZZARD_REDIRECT_URI},
-                auth=aiohttp.BasicAuth(BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET),
-            ) as resp:
-                resp.raise_for_status()
-                return await resp.json()
+    @newswow.error
+    async def newswow_error(self, interaction, error):
+        if isinstance(error, discord.app_commands.MissingPermissions):
+            await interaction.response.send_message("❌ Permission **Gérer le serveur** requise.", ephemeral=True)
 
-    async def get_account_wow_profile(self, user_token: str):
-        """Tous les personnages du compte connecté."""
-        return await self._raw_get("/profile/user/wow", "profile", user_token)
 
-    async def get_character_equipment(self, realm_slug: str, name: str):
-        path = f"/profile/wow/character/{realm_slug.lower()}/{name.lower()}/equipment"
-        return await self._get_public(path, "profile")
+async def setup(bot):
+    await bot.add_cog(News(bot))
