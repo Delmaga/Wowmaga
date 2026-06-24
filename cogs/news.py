@@ -14,7 +14,7 @@ NEWS_FEEDS = [
     "https://www.wowhead.com/news/rss",
     "https://worldofwarcraft.blizzard.com/en-us/news/rss",
 ]
-INTERVAL = int(os.getenv("NEWS_CHECK_INTERVAL_MINUTES", "30"))
+INTERVAL = int(os.getenv("NEWS_CHECK_INTERVAL_MINUTES", "2"))
 SEEN_FILE = "seen_news.json"
 
 
