@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import discord
 from discord.ext import commands
@@ -69,6 +70,10 @@ async def build_all(c: dict, client: BattleNetClient, discord_user):
     except: equip = {}
     try:    media = await client.get_character_media(realm_slug, name)
     except: media = {}
+    try:    mounts_data = await client.get_account_mounts(access_token)
+    except: mounts_data = {}
+    try:    pets_data   = await client.get_account_pets(access_token)
+    except: pets_data   = {}
 
     prof=prof or {}; equip=equip or {}
     guild      = prof.get("guild",{}).get("name")
@@ -167,9 +172,20 @@ async def build_all(c: dict, client: BattleNetClient, discord_user):
     # ══════════════════════════════════
     if items:
         try:
+            # Récupérer toutes les icônes en parallèle
+            async def _get_icon(it):
+                item_id = it.get("id")
+                if item_id:
+                    return item_id, await client.get_item_media(item_id)
+                return None, None
+
+            icon_results = await asyncio.gather(*[_get_icon(it) for it in items])
+            icon_urls    = {iid: url for iid, url in icon_results if iid and url}
+
             eq_buf  = await generate_equipment_image(
                 char_name=name, classe=classe, realm=realm,
                 equipped_ilvl=e_ilvl, items=items, class_color=rgb,
+                icon_urls=icon_urls,
             )
             eq_file = discord.File(eq_buf, filename="equipment.png")
             files.append(eq_file)
