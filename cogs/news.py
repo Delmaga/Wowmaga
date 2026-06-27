@@ -1,290 +1,256 @@
-import os
-import json
-import logging
-import re
-import asyncio
-import aiohttp
-import feedparser
-import discord
+import os, json, logging, re, asyncio
+import aiohttp, feedparser, discord
 from discord.ext import commands, tasks
 import storage
 
 log = logging.getLogger("wow-bot.news")
 
-# Flux RSS — Blizzard officiel (EN + FR) + Wowhead + Judgehype + MMO-Champion
 NEWS_FEEDS = [
-    {"url": "https://worldofwarcraft.blizzard.com/en-us/news/rss",  "source": "Blizzard"},
-    {"url": "https://worldofwarcraft.blizzard.com/fr-fr/news/rss",  "source": "Blizzard FR"},
-    {"url": "https://www.wowhead.com/news/rss",                     "source": "Wowhead"},
-    {"url": "https://judgehype.com/rss/",                           "source": "Judgehype"},
-    {"url": "https://www.mmo-champion.com/external.php?do=rss&type=newcontent&sectionid=1&days=0&count=10", "source": "MMO-Champion"},
+    {"url":"https://worldofwarcraft.blizzard.com/en-us/news/rss", "source":"Blizzard"},
+    {"url":"https://worldofwarcraft.blizzard.com/fr-fr/news/rss",  "source":"Blizzard FR"},
+    {"url":"https://www.wowhead.com/news/rss",                     "source":"Wowhead"},
+    {"url":"https://judgehype.com/rss/",                           "source":"Judgehype"},
+    {"url":"https://www.mmo-champion.com/external.php?do=rss&type=newcontent&sectionid=1&days=0&count=20","source":"MMO-Champion"},
+]
+HEADERS = {"User-Agent":"Mozilla/5.0 (compatible; WoWBot/2.0)"}
+
+SHOP_KEYWORDS = [
+    "expédition","expedition","comptoir","marchand","trading post",
+    "tender","rotation","catalogue","sceaux","monture exotique",
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; WoWBot/2.0; +https://discord.com)"
-}
+IMPORTANT_KEYWORDS = [
+    "patch","mise à jour","extension","update","hotfix","maintenance",
+    "saison","season","bug","problème","issue","downtime","tww","war within",
+]
 
-INTERVAL  = int(os.getenv("NEWS_CHECK_INTERVAL_MINUTES", "2"))
-SEEN_FILE = "seen_news.json"
-
-# Emojis par source
 SOURCE_EMOJI = {
-    "Blizzard":    "🔵",
-    "Blizzard FR": "🇫🇷",
-    "Wowhead":     "⚔️",
-    "Judgehype":   "🏆",
-    "MMO-Champion":"🛡️",
+    "Blizzard":"🔵","Blizzard FR":"🇫🇷","Wowhead":"⚔️",
+    "Judgehype":"🏆","MMO-Champion":"🛡️",
 }
 SOURCE_COLOR = {
-    "Blizzard":    0x0078FF,
-    "Blizzard FR": 0x0099CC,
-    "Wowhead":     0xFF7C0A,
-    "Judgehype":   0xFFD700,
-    "MMO-Champion":0x8B0000,
+    "Blizzard":0x0078FF,"Blizzard FR":0x0099CC,"Wowhead":0xFF7C0A,
+    "Judgehype":0xFFD700,"MMO-Champion":0x8B0000,
 }
 
-
-# Mots-clés pour détecter les articles de rotation marchands
-SHOP_KEYWORDS = [
-    "expédition", "expedition", "comptoir", "marchand",
-    "trading post", "tender", "rotation", "catalogue",
-    "argent céleste", "sceaux", "monture", "mount",
-    "cosmétique", "transmog",
-]
-
-def _is_shop_article(title: str, summary: str) -> bool:
-    text = (title + " " + summary).lower()
-    return any(kw in text for kw in SHOP_KEYWORDS)
-    text = re.sub(r"<[^<]+?>", "", text or "").strip()
-    text = re.sub(r"\s+", " ", text)
-    return text[:limit] + ("…" if len(text) > limit else "")
+INTERVAL  = int(os.getenv("NEWS_CHECK_INTERVAL_MINUTES","2"))
+SEEN_FILE = "seen_news.json"
+# News importantes à ne JAMAIS manquer (re-postées même si déjà vues)
+IMPORTANT_SEEN_FILE = "seen_important.json"
 
 
-def _load_seen() -> set:
-    if os.path.exists(SEEN_FILE):
+def _clean(text: str, limit: int = 400) -> str:
+    text = re.sub(r"<[^<]+?>","",text or "").strip()
+    text = re.sub(r"\s+"," ",text)
+    return text[:limit]+("…" if len(text)>limit else "")
+
+def _is_shop(title, summary):
+    txt = (title+" "+summary).lower()
+    return any(k in txt for k in SHOP_KEYWORDS)
+
+def _is_important(title, summary):
+    txt = (title+" "+summary).lower()
+    return any(k in txt for k in IMPORTANT_KEYWORDS)
+
+def _load(path) -> set:
+    if os.path.exists(path):
         try:
-            with open(SEEN_FILE) as f:
-                return set(json.load(f))
-        except Exception:
-            pass
+            with open(path) as f: return set(json.load(f))
+        except: pass
     return set()
 
-
-def _save_seen(seen: set):
-    with open(SEEN_FILE, "w") as f:
+def _save(path, seen: set):
+    with open(path,"w") as f:
         json.dump(list(seen)[-500:], f)
 
 
-async def _fetch_feed(session: aiohttp.ClientSession, feed_info: dict) -> list:
-    """Récupère un flux RSS et retourne les entrées avec la source."""
-    url    = feed_info["url"]
-    source = feed_info["source"]
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status != 200:
-                return []
-            text = await r.text()
-        parsed = feedparser.parse(text)
-        entries = []
-        for e in parsed.entries:
-            e["_source"] = source
-            entries.append(e)
-        return entries
-    except Exception as ex:
-        log.warning(f"Flux {source} indisponible: {ex}")
-        return []
+async def _fetch_all() -> list:
+    async def _one(session, feed):
+        try:
+            async with session.get(feed["url"],timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status!=200: return []
+                text = await r.text()
+            parsed = feedparser.parse(text)
+            for e in parsed.entries: e["_source"]=feed["source"]
+            return parsed.entries
+        except Exception as ex:
+            log.warning(f"Flux {feed['source']}: {ex}")
+            return []
+    async with aiohttp.ClientSession(headers=HEADERS) as s:
+        results = await asyncio.gather(*[_one(s,f) for f in NEWS_FEEDS])
+    out = []
+    for r in results: out.extend(r)
+    return out
 
 
 class News(commands.Cog):
     def __init__(self, bot):
         self.bot      = bot
-        self.seen_ids = _load_seen()
+        self.seen_ids = _load(SEEN_FILE)
         self.check_news.start()
 
     def cog_unload(self):
         self.check_news.cancel()
 
-    async def _fetch_all(self) -> list:
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
-            results = await asyncio.gather(*[
-                _fetch_feed(session, feed) for feed in NEWS_FEEDS
-            ])
-        all_entries = []
-        for entries in results:
-            all_entries.extend(entries)
-        return all_entries
+    def _make_embed(self, entry, ping_shop=False) -> discord.Embed:
+        source  = entry.get("_source","WoW")
+        title   = entry.get("title","Actu WoW")
+        summary = entry.get("summary","")
+        color   = SOURCE_COLOR.get(source,0xFFD700)
+
+        # News importantes = couleur rouge vif
+        if _is_important(title, summary):
+            color = 0xFF3333
+
+        embed = discord.Embed(
+            title=title[:256],
+            url=entry.get("link"),
+            description=_clean(summary),
+            color=color,
+        )
+        embed.set_author(name=f"{SOURCE_EMOJI.get(source,'📰')}  {source}  —  World of Warcraft")
+
+        # Tag visuel
+        tags = []
+        if _is_important(title, summary): tags.append("🔴 IMPORTANT")
+        if _is_shop(title, summary):       tags.append("🛒 COMPTOIR")
+        if tags:
+            embed.add_field(name="Tags", value="  ·  ".join(tags), inline=False)
+
+        for enc in entry.get("enclosures",[]):
+            if enc.get("type","").startswith("image"):
+                embed.set_thumbnail(url=enc["href"]); break
+
+        embed.set_footer(text=f"📰 {source}  ·  Vérification toutes les {INTERVAL} min")
+        return embed
 
     @tasks.loop(minutes=INTERVAL)
     async def check_news(self):
         channel_ids = await storage.get_all_news_channels()
-        if not channel_ids:
-            return
+        shop_ids    = await storage.get_all_shop_channels()
+        if not channel_ids and not shop_ids: return
 
-        all_entries = await self._fetch_all()
+        all_entries = await _fetch_all()
         new_entries = []
-        for entry in all_entries:
-            eid = entry.get("id") or entry.get("link")
+        for e in all_entries:
+            eid = e.get("id") or e.get("link")
             if eid and eid not in self.seen_ids:
-                new_entries.append(entry)
+                new_entries.append(e)
                 self.seen_ids.add(eid)
 
-        if not new_entries:
-            return
+        if not new_entries: return
 
         for entry in reversed(new_entries):
-            source = entry.get("_source", "WoW")
-            emoji  = SOURCE_EMOJI.get(source, "📰")
-            color  = SOURCE_COLOR.get(source, 0xFFD700)
-
-            embed = discord.Embed(
-                title       = entry.get("title", "Nouvelle actu WoW"),
-                url         = entry.get("link"),
-                description = _clean(entry.get("summary", "")),
-                color       = color,
-            )
-            embed.set_author(name=f"{emoji}  {source}  —  World of Warcraft")
-
-            # Image de prévisualisation si disponible
-            for enclosure in entry.get("enclosures", []):
-                if enclosure.get("type", "").startswith("image"):
-                    embed.set_thumbnail(url=enclosure["href"])
-                    break
-
-            embed.set_footer(text="📰 Actualités WoW  ·  Nouvelles toutes les quelques minutes")
-
-            for cid in channel_ids:
-                ch = self.bot.get_channel(cid)
-                if ch:
-                    try:    await ch.send(embed=embed)
-                    except discord.HTTPException as e:
-                        log.error(f"Envoi news {cid}: {e}")
-
-            # ── Salon boutique expédition ──────────────────────────
             title   = entry.get("title","")
             summary = entry.get("summary","")
-            if _is_shop_article(title, summary):
-                shop_ids = await storage.get_all_shop_channels()
+            embed   = self._make_embed(entry)
+
+            # Poster dans le salon news
+            for cid in channel_ids:
+                ch = self.bot.get_channel(cid)
+                if not ch: continue
+                try:
+                    # Ping @everyone pour les news importantes
+                    content = "@everyone 🔴 **Annonce importante !**" if _is_important(title,summary) else None
+                    await ch.send(content=content, embed=embed)
+                except discord.HTTPException as ex:
+                    log.error(f"News {cid}: {ex}")
+
+            # Poster dans le salon boutique si c'est une rotation
+            if _is_shop(title, summary):
                 shop_embed = discord.Embed(
-                    title       = f"🛒  {title}",
-                    url         = entry.get("link"),
-                    description = _clean(summary, 500),
-                    color       = 0xFF9900,
+                    title=f"🛒  {title[:200]}",
+                    url=entry.get("link"),
+                    description=_clean(summary, 600),
+                    color=0xFF9900,
                 )
                 shop_embed.set_author(name="🎪  Comptoir de l'Expédition — Nouvelle rotation !")
                 shop_embed.set_footer(text="Clique sur le titre pour voir tous les objets disponibles")
                 for scid in shop_ids:
                     sch = self.bot.get_channel(scid)
-                    if sch:
-                        try:
-                            await sch.send(content="@everyone 🛒 **Nouvelle rotation du Comptoir !**", embed=shop_embed)
-                        except discord.HTTPException as e:
-                            log.error(f"Envoi boutique {scid}: {e}")
+                    if not sch: continue
+                    try:
+                        await sch.send(
+                            content="@everyone 🛒 **Nouvelle rotation du Comptoir !**",
+                            embed=shop_embed,
+                        )
+                    except discord.HTTPException as ex:
+                        log.error(f"Boutique {scid}: {ex}")
 
-        _save_seen(self.seen_ids)
+        _save(SEEN_FILE, self.seen_ids)
 
     @check_news.before_loop
     async def before_check(self):
         await self.bot.wait_until_ready()
-        # Premier démarrage : marquer tout comme vu pour ne pas spammer
         if not self.seen_ids:
-            all_entries = await self._fetch_all()
+            all_entries = await _fetch_all()
             for e in all_entries:
                 eid = e.get("id") or e.get("link")
-                if eid:
-                    self.seen_ids.add(eid)
-            _save_seen(self.seen_ids)
+                if eid: self.seen_ids.add(eid)
+            _save(SEEN_FILE, self.seen_ids)
             log.info(f"News: {len(self.seen_ids)} articles marqués comme vus au démarrage.")
 
     @check_news.error
     async def check_news_error(self, error):
         log.error(f"Erreur task news: {error}")
+        self.check_news.restart()
 
-    # ── Commandes ───────────────────────────────────────────────────────
-    @discord.app_commands.command(
-        name="boutiqueexpedition",
-        description="⚙️ Configure le salon des rotations du Comptoir de l'Expédition (admin)"
-    )
-    @discord.app_commands.describe(salon="Salon dédié aux rotations de la boutique")
-    @discord.app_commands.checks.has_permissions(manage_guild=True)
-    async def boutiqueexpedition(self, interaction: discord.Interaction, salon: discord.TextChannel):
-        await storage.set_shop_channel(interaction.guild_id, salon.id)
-        embed = discord.Embed(
-            title="✅  Salon Comptoir de l'Expédition configuré",
-            description=(
-                f"Les rotations de marchands seront postées dans {salon.mention} avec un **@everyone**.\n\n"
-                f"**Détection automatique des articles :**\n"
-                f"🛒 Nouvelles rotations du Comptoir\n"
-                f"🐴 Nouvelles montures disponibles\n"
-                f"👗 Nouveaux cosmétiques/transmogs\n"
-                f"💰 Changements de catalogue\n\n"
-                f"*Source : Wowhead & Blizzard officiel*"
-            ),
-            color=0xFF9900,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @boutiqueexpedition.error
-    async def boutique_error(self, interaction, error):
-        if isinstance(error, discord.app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "❌ Permission **Gérer le serveur** requise.", ephemeral=True)
-
-    @discord.app_commands.command(
-        name="newswow",
-        description="⚙️ Configure le salon des actualités WoW (admin requis)"
-    )
-    @discord.app_commands.describe(salon="Salon où seront postées les actualités")
+    # ── COMMANDES ─────────────────────────────────────────────────────────
+    @discord.app_commands.command(name="newswow",
+        description="⚙️ Configure le salon des actualités WoW (admin)")
+    @discord.app_commands.describe(salon="Salon pour les actualités")
     @discord.app_commands.checks.has_permissions(manage_guild=True)
     async def newswow(self, interaction: discord.Interaction, salon: discord.TextChannel):
         await storage.set_news_channel(interaction.guild_id, salon.id)
-        embed = discord.Embed(
-            title="✅  Salon des actualités configuré",
+        embed = discord.Embed(title="✅ Salon actualités configuré", color=0x57F287,
             description=(
-                f"Les actualités WoW seront postées dans {salon.mention}.\n\n"
-                f"**Sources surveillées :**\n"
-                + "\n".join(f"{SOURCE_EMOJI.get(f['source'],'📰')}  {f['source']}" for f in NEWS_FEEDS)
-                + f"\n\n🔄 Vérification toutes les **{INTERVAL} minutes**."
-            ),
-            color=0x57F287,
-        )
+                f"Actualités WoW → {salon.mention}\n\n"
+                "**Sources :**\n"
+                +"\n".join(f"{SOURCE_EMOJI.get(f['source'],'📰')} {f['source']}" for f in NEWS_FEEDS)
+                +f"\n\n🔴 @everyone sur les annonces importantes\n"
+                f"🔄 Vérification toutes les **{INTERVAL} min**"
+            ))
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @newswow.error
-    async def newswow_error(self, interaction, error):
-        if isinstance(error, discord.app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "❌ Permission **Gérer le serveur** requise.", ephemeral=True)
+    async def newswow_error(self, i, e):
+        if isinstance(e, discord.app_commands.MissingPermissions):
+            await i.response.send_message("❌ Permission **Gérer le serveur** requise.", ephemeral=True)
 
-    @discord.app_commands.command(
-        name="dernieresactus",
-        description="📰 Affiche les 5 dernières actualités WoW"
-    )
+    @discord.app_commands.command(name="boutiqueexpedition",
+        description="⚙️ Configure le salon du Comptoir de l'Expédition (admin)")
+    @discord.app_commands.describe(salon="Salon dédié à la boutique")
+    @discord.app_commands.checks.has_permissions(manage_guild=True)
+    async def boutiqueexpedition(self, interaction: discord.Interaction, salon: discord.TextChannel):
+        await storage.set_shop_channel(interaction.guild_id, salon.id)
+        embed = discord.Embed(title="✅ Salon Comptoir configuré", color=0xFF9900,
+            description=(
+                f"Rotations du Comptoir → {salon.mention} avec **@everyone**\n\n"
+                "Détecte automatiquement : rotations, nouvelles montures, cosmétiques, catalogue."
+            ))
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @boutiqueexpedition.error
+    async def boutique_error(self, i, e):
+        if isinstance(e, discord.app_commands.MissingPermissions):
+            await i.response.send_message("❌ Permission **Gérer le serveur** requise.", ephemeral=True)
+
+    @discord.app_commands.command(name="dernieresactus",
+        description="📰 Affiche les 8 dernières actualités WoW de toutes les sources")
     async def dernieresactus(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        all_entries = await self._fetch_all()
+        all_entries = await _fetch_all()
         if not all_entries:
             await interaction.followup.send("❌ Impossible de récupérer les actus.", ephemeral=True)
             return
-
         embeds = []
-        seen   = set()
-        for entry in all_entries[:20]:
+        seen_titles = set()
+        for entry in all_entries:
             title = entry.get("title","?")
-            if title in seen:
-                continue
-            seen.add(title)
-            source = entry.get("_source","WoW")
-            embed  = discord.Embed(
-                title=title,
-                url=entry.get("link"),
-                description=_clean(entry.get("summary","")),
-                color=SOURCE_COLOR.get(source, 0xFFD700),
-            )
-            embed.set_author(name=f"{SOURCE_EMOJI.get(source,'📰')}  {source}")
-            embeds.append(embed)
-            if len(embeds) >= 5:
-                break
-
+            if title in seen_titles: continue
+            seen_titles.add(title)
+            embeds.append(self._make_embed(entry))
+            if len(embeds) >= 8: break
         await interaction.followup.send(embeds=embeds)
 
 
