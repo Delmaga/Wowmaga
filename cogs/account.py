@@ -31,9 +31,12 @@ CLASS_ICONS = {
 FACTION = {"ALLIANCE":"Alliance 🔵","HORDE":"Horde 🔴"}
 
 def _hex(rgb): return (rgb[0]<<16)|(rgb[1]<<8)|rgb[2]
-def _render(media, key="inset"):
+def _render(media, key="main-raw"):
     for a in (media or {}).get("assets",[]):
         if a.get("key")==key: return a.get("value")
+    # Fallback sur inset si main-raw absent
+    for a in (media or {}).get("assets",[]):
+        if a.get("key")=="inset": return a.get("value")
     return None
 
 
@@ -64,20 +67,20 @@ async def build_card(c: dict, client: BattleNetClient, discord_user, access_toke
     e_ilvl  = prof.get("equipped_item_level",0)
     a_ilvl  = prof.get("average_item_level",0)
     achiev  = prof.get("achievement_points",0)
-    render  = _render(media,"inset") or _render(media,"main-raw")
+    render  = _render(media,"main-raw") or _render(media,"inset")
 
     items   = (equip or {}).get("equipped_items",[])
 
-    # Récupérer toutes les icônes en parallèle
+    # ← CORRECTION : l'ID est dans it["item"]["id"], pas it["id"]
     icon_urls = {}
     if items:
         async def _get_icon(it):
-            iid = it.get("id")
+            iid = it.get("item",{}).get("id")
             if iid:
                 url = await client.get_item_media(iid)
                 return iid, url
             return None, None
-        results = await asyncio.gather(*[_get_icon(it) for it in items])
+        results   = await asyncio.gather(*[_get_icon(it) for it in items])
         icon_urls = {iid: url for iid, url in results if iid and url}
 
     # Générer la grande image unique
