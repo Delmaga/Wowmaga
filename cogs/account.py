@@ -5,8 +5,7 @@ from discord.ext import commands
 
 import storage
 from bnet import BattleNetClient
-from card_generator import generate_equipment_image
-from stats_generator import generate_stats_image
+from character_card import generate_character_card
 
 log = logging.getLogger("wow-bot.account")
 
@@ -29,28 +28,16 @@ CLASS_ICONS = {
     "Druide":"🌿","Druid":"🌿","Chasseur de démons":"🔮","Demon Hunter":"🔮",
     "Évocateur":"🐉","Evoker":"🐉",
 }
-QUALITY_ICON  = {"LEGENDARY":"🟠","EPIC":"🟣","RARE":"🔵","UNCOMMON":"🟢","COMMON":"⬜","POOR":"⬛"}
-QUALITY_LABEL = {"LEGENDARY":"Légendaire","EPIC":"Épique","RARE":"Rare","UNCOMMON":"Peu commun","COMMON":"Commun"}
-FACTION       = {"ALLIANCE":("Alliance 🔵"),"HORDE":("Horde 🔴")}
-SLOT_ORDER    = [
-    "Head","Neck","Shoulder","Back","Chest","Wrist","Hand","Waist","Legs","Feet",
-    "Finger","Trinket","Main-Hand","Off-Hand",
-    "Tête","Cou","Épaule","Dos","Torse","Poignet","Mains","Taille","Jambes","Pieds",
-    "Doigt","Bibelot","Main droite","Main gauche",
-]
+FACTION = {"ALLIANCE":"Alliance 🔵","HORDE":"Horde 🔴"}
 
 def _hex(rgb): return (rgb[0]<<16)|(rgb[1]<<8)|rgb[2]
 def _render(media, key="inset"):
     for a in (media or {}).get("assets",[]):
         if a.get("key")==key: return a.get("value")
     return None
-def _slot_key(it):
-    s = it.get("slot",{}).get("name","")
-    try: return SLOT_ORDER.index(s)
-    except: return 99
 
 
-async def build_all(c: dict, client: BattleNetClient, discord_user):
+async def build_card(c: dict, client: BattleNetClient, discord_user, access_token: str):
     name       = c.get("name","?")
     level      = c.get("level",0)
     classe     = c.get("playable_class",{}).get("name","?")
@@ -70,144 +57,56 @@ async def build_all(c: dict, client: BattleNetClient, discord_user):
     except: equip = {}
     try:    media = await client.get_character_media(realm_slug, name)
     except: media = {}
-    try:    mounts_data = await client.get_account_mounts(access_token)
-    except: mounts_data = {}
-    try:    pets_data   = await client.get_account_pets(access_token)
-    except: pets_data   = {}
 
     prof=prof or {}; equip=equip or {}
-    guild      = prof.get("guild",{}).get("name")
-    spec       = prof.get("active_spec",{}).get("name")
-    e_ilvl     = prof.get("equipped_item_level",0)
-    a_ilvl     = prof.get("average_item_level",0)
-    achiev     = prof.get("achievement_points",0)
-    last_login = prof.get("last_login_timestamp")
-    render_url = _render(media,"inset") or _render(media,"main-raw")
-    avatar_url = _render(media,"avatar")
+    guild   = prof.get("guild",{}).get("name")
+    spec    = prof.get("active_spec",{}).get("name")
+    e_ilvl  = prof.get("equipped_item_level",0)
+    a_ilvl  = prof.get("average_item_level",0)
+    achiev  = prof.get("achievement_points",0)
+    render  = _render(media,"inset") or _render(media,"main-raw")
 
-    embeds = []
-    files  = []
+    items   = (equip or {}).get("equipped_items",[])
 
-    # ══════════════════════════════════
-    # CARTE 1 : HERO (render 3D)
-    # ══════════════════════════════════
-    hero = discord.Embed(color=color)
-    hero.set_author(
-        name=f"⚔️  Fiche de {discord_user.display_name}  —  World of Warcraft",
+    # Récupérer toutes les icônes en parallèle
+    icon_urls = {}
+    if items:
+        async def _get_icon(it):
+            iid = it.get("id")
+            if iid:
+                url = await client.get_item_media(iid)
+                return iid, url
+            return None, None
+        results = await asyncio.gather(*[_get_icon(it) for it in items])
+        icon_urls = {iid: url for iid, url in results if iid and url}
+
+    # Générer la grande image unique
+    buf = await generate_character_card(
+        name=name, classe=classe, spec=spec or "", race=race,
+        realm=realm, faction=faction, guild=guild,
+        level=int(level), e_ilvl=e_ilvl, a_ilvl=a_ilvl, achiev=achiev,
+        class_color=rgb, render_url=render, avatar_url=_render(media,"avatar"),
+        items=items, icon_urls=icon_urls,
+    )
+
+    card_file  = discord.File(buf, filename="character.png")
+    card_embed = discord.Embed(color=color)
+    card_embed.set_author(
+        name=f"{icon}  {name.upper()}  —  Fiche de {discord_user.display_name}",
         icon_url=discord_user.display_avatar.url,
     )
-    hero.title = f"{icon}  {name.upper()}"
-    hero.description = (
-        f"```ansi\n"
-        f"\u001b[2;34m{'═'*36}\u001b[0m\n"
-        f"  \u001b[1;37m{(spec+' ' if spec else '')+classe}\u001b[0m\n"
-        f"  Race      {race}\n"
-        f"  Faction   {faction}\n"
-        f"  Royaume   {realm}\n"
-        +(f"  Guilde    <{guild}>\n" if guild else "")
-        +f"\u001b[2;34m{'═'*36}\u001b[0m\n"
-        f"```"
-    )
-    if render_url: hero.set_image(url=render_url)
-    if avatar_url: hero.set_thumbnail(url=avatar_url)
-    embeds.append(hero)
+    card_embed.set_image(url="attachment://character.png")
+    card_embed.set_footer(text="World of Warcraft  ·  API Blizzard officielle  ·  /deconnecter-wow pour délier")
 
-    # ══════════════════════════════════
-    # CARTE 2 : STATS (image générée)
-    # ══════════════════════════════════
-    try:
-        stats_buf = await generate_stats_image(
-            char_name=name, classe=classe, spec=spec or "", race=race,
-            realm=realm, faction=faction, guild=guild,
-            level=int(level), e_ilvl=e_ilvl, a_ilvl=a_ilvl,
-            achiev=achiev, last_login_ms=last_login,
-            class_color=rgb, avatar_url=avatar_url,
-        )
-        stats_file = discord.File(stats_buf, filename="stats.png")
-        files.append(stats_file)
-        stats_embed = discord.Embed(color=color)
-        stats_embed.title = f"📊  Statistiques — {name}"
-        stats_embed.set_image(url="attachment://stats.png")
-        embeds.append(stats_embed)
-    except Exception as e:
-        log.error(f"Stats image: {e}")
-
-    # ══════════════════════════════════
-    # CARTE 3 : OBJETS PORTÉS (texte)
-    # ══════════════════════════════════
-    items = equip.get("equipped_items",[])
-    if items:
-        gear_embed = discord.Embed(color=color)
-        gear_embed.title = f"🗡️  Objets portés — {name}"
-
-        items_sorted = sorted(items, key=_slot_key)
-        left, right  = [], []
-        for i, it in enumerate(items_sorted[:16]):
-            slot    = it.get("slot",{}).get("name","?")
-            iname   = it.get("name","?")
-            ilvl    = it.get("level",{}).get("value","?")
-            quality = it.get("quality",{}).get("type","COMMON")
-            dot     = QUALITY_ICON.get(quality,"⬜")
-            line    = f"{dot} **{iname}**\n`{slot}  •  ilvl {ilvl}`"
-            (left if i%2==0 else right).append(line)
-
-        if left:  gear_embed.add_field(name="​", value="\n\n".join(left),  inline=True)
-        if right: gear_embed.add_field(name="​", value="\n\n".join(right), inline=True)
-
-        # Résumé qualités
-        qcount: dict[str,int] = {}
-        for it in items:
-            q = it.get("quality",{}).get("type","COMMON")
-            qcount[q] = qcount.get(q,0)+1
-        summary = "  ·  ".join(
-            f"{QUALITY_ICON.get(q,'⬜')} {QUALITY_LABEL.get(q,q)} ×{n}"
-            for q,n in qcount.items() if q in QUALITY_ICON
-        )
-        if summary:
-            gear_embed.add_field(name="✦  Qualités", value=summary, inline=False)
-        embeds.append(gear_embed)
-
-    # ══════════════════════════════════
-    # CARTE 4 : IMAGE ÉQUIPEMENT
-    # ══════════════════════════════════
-    if items:
-        try:
-            # Récupérer toutes les icônes en parallèle
-            async def _get_icon(it):
-                item_id = it.get("id")
-                if item_id:
-                    return item_id, await client.get_item_media(item_id)
-                return None, None
-
-            icon_results = await asyncio.gather(*[_get_icon(it) for it in items])
-            icon_urls    = {iid: url for iid, url in icon_results if iid and url}
-
-            eq_buf  = await generate_equipment_image(
-                char_name=name, classe=classe, realm=realm,
-                equipped_ilvl=e_ilvl, items=items, class_color=rgb,
-                icon_urls=icon_urls,
-            )
-            eq_file = discord.File(eq_buf, filename="equipment.png")
-            files.append(eq_file)
-            eq_embed = discord.Embed(color=color)
-            eq_embed.title = f"🎒  Aperçu équipement — {name}"
-            eq_embed.set_image(url="attachment://equipment.png")
-            eq_embed.set_footer(text="Données via l'API officielle Blizzard  ·  /deconnecter-wow pour délier")
-            embeds.append(eq_embed)
-        except Exception as e:
-            log.error(f"Equipment image: {e}")
-
-    return embeds, files
+    return card_embed, card_file
 
 
-# ══════════════════════════════════════
-# MENU SÉLECTION
-# ══════════════════════════════════════
 class CharacterSelect(discord.ui.Select):
-    def __init__(self, characters, client, discord_user):
+    def __init__(self, characters, client, discord_user, access_token):
         self.characters   = characters
         self.client       = client
         self.discord_user = discord_user
+        self.access_token = access_token
         options = [
             discord.SelectOption(
                 label=f"{c.get('name')} — Niv. {c.get('level','?')}",
@@ -222,20 +121,17 @@ class CharacterSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         c = self.characters[int(self.values[0])]
-        embeds, files = await build_all(c, self.client, self.discord_user)
+        embed, f = await build_card(c, self.client, self.discord_user, self.access_token)
         view = discord.ui.View(timeout=300)
-        view.add_item(CharacterSelect(self.characters, self.client, self.discord_user))
-        await interaction.edit_original_response(embeds=embeds[:10], attachments=files, view=view)
+        view.add_item(CharacterSelect(self.characters, self.client, self.discord_user, self.access_token))
+        await interaction.edit_original_response(embeds=[embed], attachments=[f], view=view)
 
 
-# ══════════════════════════════════════
-# COG
-# ══════════════════════════════════════
 class Account(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @discord.app_commands.command(name="comptewow", description="✨ Affiche ta fiche WoW (visible par tous)")
+    @discord.app_commands.command(name="comptewow", description="✨ Affiche ta fiche de personnage WoW")
     async def comptewow(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
@@ -247,34 +143,31 @@ class Account(commands.Cog):
             view.add_item(discord.ui.Button(label="🔗 Connecter mon compte Battle.net",
                                             url=url, style=discord.ButtonStyle.link))
             embed = discord.Embed(
-                title="🔐  Connexion requise",
+                title="🔐 Connexion Battle.net requise",
                 description=(
                     "```\n"
                     "Connecte ton compte Battle.net\n"
                     "pour afficher ta fiche.\n"
                     "──────────────────────────────\n"
                     "✅ Connexion officielle Blizzard\n"
-                    "✅ Mot de passe jamais vu par le bot\n"
+                    "✅ Mot de passe jamais vu\n"
                     "──────────────────────────────\n"
                     "↳ Retape /comptewow après connexion\n"
                     "```"
-                ),
-                color=0x0078FF,
+                ), color=0x0078FF,
             )
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
             return
 
         client = BattleNetClient(region=link["region"])
-        try:
-            data = await client.get_account_wow_profile(link["access_token"])
+        try:    data = await client.get_account_wow_profile(link["access_token"])
         except Exception as e:
             log.error(f"Profil {interaction.user.id}: {e}")
             await storage.delete_user_link(interaction.user.id)
             await interaction.followup.send(
                 embed=discord.Embed(title="❌ Session expirée",
                     description="Retape `/comptewow` pour te reconnecter.", color=0xFF0000),
-                ephemeral=True)
-            return
+                ephemeral=True); return
 
         characters = []
         for acc in (data or {}).get("wow_accounts",[]):
@@ -282,17 +175,15 @@ class Account(commands.Cog):
         characters.sort(key=lambda c: c.get("level",0), reverse=True)
 
         if not characters:
-            await interaction.followup.send("Aucun personnage trouvé.", ephemeral=True)
-            return
+            await interaction.followup.send("Aucun personnage trouvé.", ephemeral=True); return
 
-        embeds, files = await build_all(characters[0], client, interaction.user)
+        embed, f = await build_card(characters[0], client, interaction.user, link["access_token"])
         view = discord.ui.View(timeout=300)
         if len(characters) > 1:
-            view.add_item(CharacterSelect(characters, client, interaction.user))
+            view.add_item(CharacterSelect(characters, client, interaction.user, link["access_token"]))
+        await interaction.followup.send(embed=embed, file=f, view=view)
 
-        await interaction.followup.send(embeds=embeds[:10], files=files, view=view)
-
-    @discord.app_commands.command(name="deconnecter-wow", description="Délie ton compte Battle.net (privé)")
+    @discord.app_commands.command(name="deconnecter-wow", description="Délie ton compte Battle.net")
     async def deconnecter_wow(self, interaction: discord.Interaction):
         await storage.delete_user_link(interaction.user.id)
         await interaction.response.send_message(
