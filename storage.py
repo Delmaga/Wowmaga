@@ -9,8 +9,9 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-moi")
 
 _SQL = """
 CREATE TABLE IF NOT EXISTS guild_settings (
-    guild_id       INTEGER PRIMARY KEY,
-    news_channel_id INTEGER
+    guild_id        INTEGER PRIMARY KEY,
+    news_channel_id INTEGER,
+    shop_channel_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS user_links (
     discord_id    INTEGER PRIMARY KEY,
@@ -27,6 +28,7 @@ async def init_db():
         await db.executescript(_SQL)
         await db.commit()
 
+# ── Salons news ───────────────────────────────────────────────────────
 async def set_news_channel(guild_id: int, channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -41,6 +43,22 @@ async def get_all_news_channels() -> list:
         async with db.execute("SELECT news_channel_id FROM guild_settings WHERE news_channel_id IS NOT NULL") as c:
             return [r[0] for r in await c.fetchall()]
 
+# ── Salon boutique expédition ─────────────────────────────────────────
+async def set_shop_channel(guild_id: int, channel_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO guild_settings(guild_id,shop_channel_id) VALUES(?,?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET shop_channel_id=excluded.shop_channel_id",
+            (guild_id, channel_id),
+        )
+        await db.commit()
+
+async def get_all_shop_channels() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT shop_channel_id FROM guild_settings WHERE shop_channel_id IS NOT NULL") as c:
+            return [r[0] for r in await c.fetchall()]
+
+# ── Comptes liés ──────────────────────────────────────────────────────
 def sign_state(discord_id: int) -> str:
     sig = hmac.new(SECRET_KEY.encode(), str(discord_id).encode(), hashlib.sha256).hexdigest()[:20]
     return f"{discord_id}.{sig}"
@@ -73,10 +91,9 @@ async def get_user_link(discord_id: int):
             (discord_id,),
         ) as c:
             row = await c.fetchone()
-            if not row:
-                return None
-            return {"region": row[0], "battletag": row[1], "access_token": row[2],
-                    "refresh_token": row[3], "expires_at": row[4]}
+            if not row: return None
+            return {"region":row[0],"battletag":row[1],"access_token":row[2],
+                    "refresh_token":row[3],"expires_at":row[4]}
 
 async def delete_user_link(discord_id: int):
     async with aiosqlite.connect(DB_PATH) as db:

@@ -83,3 +83,19 @@ class BattleNetClient:
 
     async def get_character_media(self, realm_slug: str, name: str) -> dict:
         return await self._pub(f"/profile/wow/character/{realm_slug}/{name.lower()}/character-media", "profile")
+
+    async def get_item_media(self, item_id: int) -> str | None:
+        """Retourne l'URL de l'icône d'un item via son ID."""
+        data = await self._pub(f"/data/wow/media/item/{item_id}", "static")
+        for a in (data or {}).get("assets", []):
+            if a.get("key") == "icon":
+                return a.get("value")
+        return None
+
+    async def get_account_mounts(self, user_token: str) -> dict:
+        """Toutes les montures collectées sur le compte."""
+        return await self._get("/profile/user/wow/collections/mounts", "profile", user_token)
+
+    async def get_account_pets(self, user_token: str) -> dict:
+        """Tous les familiers de combat collectés sur le compte."""
+        return await self._get("/profile/user/wow/collections/pets", "profile", user_token)

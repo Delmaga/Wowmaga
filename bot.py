@@ -31,6 +31,7 @@ async def main():
     async with bot:
         await bot.load_extension("cogs.news")
         await bot.load_extension("cogs.account")
+        await bot.load_extension("cogs.weekly")
         await bot.start(TOKEN)
 
 
